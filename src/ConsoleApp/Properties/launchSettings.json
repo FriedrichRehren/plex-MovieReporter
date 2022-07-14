@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "ConsoleApp": {
+      "commandName": "Project",
+      "commandLineArgs": "-i C:\\Users\\priva\\Videos\\MakeMKV\\#Movies\r\n-o C:\\Users\\priva\\Videos\\MakeMKV\\#Movies"
+    }
+  }
+}
