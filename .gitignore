@@ -1,0 +1,13 @@
+bin/
+obj/
+/packages/
+.idea/
+*.DotSettings.user
+.vs/
+*.user
+publish/
+riderModule.iml
+/_ReSharper.Caches/
+MovieReporter.exe
+.codex*/
+.dotnet/
