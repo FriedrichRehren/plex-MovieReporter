@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$projectPath = Join-Path $PSScriptRoot "MovieReporter.UI\MovieReporter.UI.csproj"
+$projectPath = Join-Path $PSScriptRoot "MovieReporter.WPF\MovieReporter.WPF.csproj"
 $publishDir = Join-Path $PSScriptRoot "publish"
 
 dotnet publish $projectPath `
@@ -19,7 +19,7 @@ dotnet publish $projectPath `
   -p:DebugSymbols=false `
   -o $publishDir
 
-$sourceExe = Join-Path $publishDir "MovieReporter.UI.exe"
+$sourceExe = Join-Path $publishDir "MovieReporter.WPF.exe"
 if (!(Test-Path $sourceExe)) {
     $exe = Get-ChildItem -Path $publishDir -Filter *.exe | Select-Object -First 1
     if (-not $exe) {

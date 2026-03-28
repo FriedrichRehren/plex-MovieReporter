@@ -1,4 +1,4 @@
-﻿namespace MovieReporter.UI
+﻿namespace MovieReporter.WPF
 {
     /// <summary>
     /// Interaction logic for App.xaml

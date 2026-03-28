@@ -1,6 +1,6 @@
 using MovieReporter.Core.Models;
 
-namespace MovieReporter.UI;
+namespace MovieReporter.WPF;
 
 public sealed class AppState
 {

@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text.Json;
 
-namespace MovieReporter.UI;
+namespace MovieReporter.WPF;
 
 public static class AppStateStore
 {

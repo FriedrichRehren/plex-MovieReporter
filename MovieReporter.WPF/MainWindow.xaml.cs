@@ -12,7 +12,7 @@ using ColorConverter = System.Windows.Media.ColorConverter;
 using SolidColorBrush = System.Windows.Media.SolidColorBrush;
 using Forms = System.Windows.Forms;
 
-namespace MovieReporter.UI;
+namespace MovieReporter.WPF;
 
 public partial class MainWindow : Window
 {
