@@ -1,0 +1,38 @@
+name: Build WPF App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-wpf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish WPF app
+        shell: pwsh
+        run: ./publish-wpf.ps1
+
+      - name: Upload WPF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MovieReporter-wpf
+          path: MovieReporter.exe
+          if-no-files-found: error
