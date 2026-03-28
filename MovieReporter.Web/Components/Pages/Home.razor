@@ -1,0 +1,368 @@
+@page "/"
+@rendermode InteractiveServer
+
+<PageTitle>Movie Reporter</PageTitle>
+
+<div class="report-shell">
+    <section class="hero-panel">
+        <div>
+            <h1>Movie Reporter</h1>
+            <p>Scan a root library that contains Movies and TV Shows, then export the active tab in parallel.</p>
+        </div>
+
+        <div class="hero-status-card">
+            <span class="hero-status-label">Session Status</span>
+            <strong>@StatusText</strong>
+        </div>
+    </section>
+
+    <div class="workspace-grid">
+        <aside class="panel-surface control-panel">
+            <div class="panel-scroll">
+                <fieldset class="control-fieldset" disabled="@IsBusy">
+                    <section class="form-section">
+                        <h2>Export</h2>
+                        <p class="section-copy">The active result tab is exported to the server user's Downloads folder. A `-movies` or `-tv-shows` suffix is added automatically.</p>
+                        <label class="field-label" for="output-file-name">Export file name</label>
+                        <input id="output-file-name"
+                               class="text-input"
+                               value="@OutputFileName"
+                               @onchange="OnOutputFileNameChangedAsync" />
+                    </section>
+
+                    <div class="section-divider"></div>
+
+                    <section class="form-section">
+                        <h2>Formats</h2>
+                        <p class="section-copy">Multiple selections are exported in parallel on background tasks.</p>
+                        <div class="format-grid">
+                            @foreach (var format in AvailableFormats)
+                            {
+                                <label class="format-toggle">
+                                    <input type="checkbox"
+                                           checked="@IsFormatSelected(format)"
+                                           @onchange="args => OnFormatChangedAsync(format, args)" />
+                                    <span>@format</span>
+                                </label>
+                            }
+                        </div>
+
+                        <div class="action-grid">
+                            <button type="button"
+                                    class="button button-secondary"
+                                    @onclick="ScanLibraryAsync">
+                                Scan Library
+                            </button>
+
+                            <button type="button"
+                                    class="button button-primary"
+                                    @onclick="ExportActiveTabAsync">
+                                Export Active Tab
+                            </button>
+                        </div>
+                    </section>
+                </fieldset>
+
+                <section class="subpanel">
+                    <h3>Activity</h3>
+                    @if (IsBusy)
+                    {
+                        <div class="activity-progress" aria-hidden="true"></div>
+                    }
+                    <p class="activity-text @(LastOperationFailed ? "activity-text-error" : string.Empty)">@StatusText</p>
+                </section>
+
+                <section class="subpanel">
+                    <h3>Exported Files</h3>
+                    @if (ExportedFiles.Count == 0)
+                    {
+                        <p class="muted-copy">No files exported yet.</p>
+                    }
+                    else
+                    {
+                        <ul class="export-list">
+                            @foreach (var filePath in ExportedFiles)
+                            {
+                                <li>@filePath</li>
+                            }
+                        </ul>
+                    }
+                </section>
+            </div>
+        </aside>
+
+        <section class="panel-surface results-panel">
+            <div class="results-heading">
+                <div>
+                    <h2>Library Results</h2>
+                    <p>Scan once, switch between Movies and TV Shows, and export the active tab.</p>
+                </div>
+            </div>
+
+            <section class="filter-panel">
+                <div class="filter-top-row">
+                    <div class="search-field">
+                        <label class="field-label" for="search-box">Search</label>
+                        <input id="search-box"
+                               class="text-input"
+                               value="@SearchText"
+                               @oninput="OnSearchTextChanged" />
+                    </div>
+
+                    <button type="button"
+                            class="button button-secondary clear-filter-button"
+                            @onclick="ClearFilters">
+                        Clear Filters
+                    </button>
+                </div>
+
+                <div class="resolution-section">
+                    <p class="field-label">Resolution Availability</p>
+                    <div class="chip-row">
+                        @foreach (var resolution in OrderedResolutions)
+                        {
+                            <button type="button"
+                                    class="chip-button @(IsResolutionSelected(resolution) ? "chip-button-active" : string.Empty)"
+                                    aria-pressed="@IsResolutionSelected(resolution)"
+                                    @onclick="() => ToggleResolutionFilter(resolution)">
+                                @GetResolutionLabel(resolution)
+                            </button>
+                        }
+                    </div>
+                    <p class="filter-summary">@FilterSummaryText</p>
+                </div>
+            </section>
+
+            <div class="tab-strip" role="tablist" aria-label="Result tabs">
+                <button type="button"
+                        class="tab-button @(ActiveResultTab == ResultTab.Movies ? "tab-button-active" : string.Empty)"
+                        role="tab"
+                        aria-selected="@(ActiveResultTab == ResultTab.Movies)"
+                        @onclick="() => ChangeTabAsync(ResultTab.Movies)">
+                    Movies
+                </button>
+
+                <button type="button"
+                        class="tab-button @(ActiveResultTab == ResultTab.TvShows ? "tab-button-active" : string.Empty)"
+                        role="tab"
+                        aria-selected="@(ActiveResultTab == ResultTab.TvShows)"
+                        @onclick="() => ChangeTabAsync(ResultTab.TvShows)">
+                    TV Shows
+                </button>
+            </div>
+
+            @if (ActiveResultTab == ResultTab.Movies)
+            {
+                <div class="result-tab">
+                    <div class="summary-grid summary-grid-movies">
+                        <article class="summary-card">
+                            <span>Movies</span>
+                            <strong>@MovieCountDisplay</strong>
+                        </article>
+
+                        <article class="summary-card">
+                            <span>Resolution Entries</span>
+                            <strong>@MovieResolutionCountDisplay</strong>
+                        </article>
+                    </div>
+
+                    <div class="table-shell">
+                        <table class="results-table">
+                            <thead>
+                                <tr>
+                                    <th>Title</th>
+                                    <th>Year</th>
+                                    <th>IMDb</th>
+                                    <th>TMDb</th>
+                                    <th>Availability</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @if (FilteredMovieRows.Count == 0)
+                                {
+                                    <tr>
+                                        <td colspan="5" class="empty-state-cell">No movie results match the current filters.</td>
+                                    </tr>
+                                }
+                                else
+                                {
+                                    @foreach (var movieRow in FilteredMovieRows)
+                                    {
+                                        <tr>
+                                            <td>@movieRow.Name</td>
+                                            <td>@movieRow.Year</td>
+                                            <td>@movieRow.ImdbId</td>
+                                            <td>@movieRow.TmdbId</td>
+                                            <td class="badge-cell">
+                                                <div class="badge-stack">
+                                                    @foreach (var badge in movieRow.ResolutionBadges)
+                                                    {
+                                                        <span class="resolution-badge" style="@badge.Palette.ToInlineStyle()">@badge.Label</span>
+                                                    }
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="result-tab">
+                    <div class="summary-grid summary-grid-tv">
+                        <article class="summary-card">
+                            <span>TV Shows</span>
+                            <strong>@TvShowCountDisplay</strong>
+                        </article>
+
+                        <article class="summary-card">
+                            <span>Seasons</span>
+                            <strong>@TvSeasonCountDisplay</strong>
+                        </article>
+
+                        <article class="summary-card">
+                            <span>Video Files</span>
+                            <strong>@TvEpisodeCountDisplay</strong>
+                        </article>
+
+                        <article class="summary-card">
+                            <span>Resolution Entries</span>
+                            <strong>@TvResolutionCountDisplay</strong>
+                        </article>
+                    </div>
+
+                    <div class="tv-layout">
+                        <div class="table-shell">
+                            <table class="results-table tv-results-table">
+                                <thead>
+                                    <tr>
+                                        <th>Title</th>
+                                        <th>Year</th>
+                                        <th>Seasons</th>
+                                        <th>Files</th>
+                                        <th>Availability</th>
+                                        <th>Inspection</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @if (FilteredTvShowRows.Count == 0)
+                                    {
+                                        <tr>
+                                            <td colspan="6" class="empty-state-cell">No TV show results match the current filters.</td>
+                                        </tr>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var tvShowRow in FilteredTvShowRows)
+                                        {
+                                            <tr class="@(ReferenceEquals(SelectedTvShowRow, tvShowRow) ? "selected-row" : string.Empty)"
+                                                @onclick="() => SelectTvShow(tvShowRow)">
+                                                <td>@tvShowRow.Name</td>
+                                                <td>@tvShowRow.Year</td>
+                                                <td>@tvShowRow.SeasonCount</td>
+                                                <td>@tvShowRow.EpisodeCount</td>
+                                                <td class="badge-cell">
+                                                    <div class="badge-stack">
+                                                        @foreach (var badge in tvShowRow.ResolutionBadges)
+                                                        {
+                                                            <span class="resolution-badge" style="@badge.Palette.ToInlineStyle()">@badge.Label</span>
+                                                        }
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div class="inspection-cell">
+                                                        <span class="inspection-pill" style="@tvShowRow.InspectionPalette.ToInlineStyle()">
+                                                            @tvShowRow.InspectionStatus
+                                                        </span>
+                                                        <span class="inspection-summary">@tvShowRow.InspectionSummary</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <aside class="inspection-panel">
+                            <h3>Show Inspection</h3>
+                            <div class="inspection-title">@SelectedShowTitle</div>
+                            <p class="inspection-metadata">@SelectedShowMetadata</p>
+
+                            <div class="inspection-status-card" style="@SelectedShowPalette.ToInlineStyle()">
+                                <strong>@SelectedShowStatusHeading</strong>
+                                <p>@SelectedShowSummary</p>
+                                @if (!string.IsNullOrWhiteSpace(SelectedShowDiagnostics))
+                                {
+                                    <p>@SelectedShowDiagnostics</p>
+                                }
+                            </div>
+
+                            <div class="inspection-metrics">
+                                <article class="mini-summary-card">
+                                    <span>Indexed</span>
+                                    <strong>@SelectedShowIndexedEpisodes</strong>
+                                </article>
+
+                                <article class="mini-summary-card">
+                                    <span>Missing</span>
+                                    <strong>@SelectedShowMissingEpisodes</strong>
+                                </article>
+
+                                <article class="mini-summary-card">
+                                    <span>Duplicates</span>
+                                    <strong>@SelectedShowDuplicateEpisodes</strong>
+                                </article>
+
+                                <article class="mini-summary-card">
+                                    <span>Unparsed Files</span>
+                                    <strong>@SelectedShowUnparsedFiles</strong>
+                                </article>
+                            </div>
+
+                            <div class="inspection-section">
+                                <p class="inspection-section-title">Available Resolutions</p>
+                                <div class="badge-stack">
+                                    @foreach (var badge in SelectedShowResolutionBadges)
+                                    {
+                                        <span class="resolution-badge" style="@badge.Palette.ToInlineStyle()">@badge.Label</span>
+                                    }
+                                </div>
+                            </div>
+
+                            <div class="inspection-section">
+                                <p class="inspection-section-title">Season Breakdown</p>
+                                <div class="season-list">
+                                    @if (SelectedShowSeasonInspections.Count == 0)
+                                    {
+                                        <div class="season-card season-card-empty">
+                                            Pick a row in the TV Shows table to inspect season gaps and episode coverage.
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var season in SelectedShowSeasonInspections)
+                                        {
+                                            <article class="season-card">
+                                                <div class="season-card-header">
+                                                    <strong>@season.SeasonLabel</strong>
+                                                    <span class="inspection-pill" style="@season.Palette.ToInlineStyle()">@season.StatusText</span>
+                                                </div>
+                                                <p>@season.FoundSummary</p>
+                                                <p>@season.MissingSummary</p>
+                                                <p class="season-diagnostics">@season.DiagnosticsSummary</p>
+                                            </article>
+                                        }
+                                    }
+                                </div>
+                            </div>
+                        </aside>
+                    </div>
+                </div>
+            }
+        </section>
+    </div>
+</div>

@@ -1,0 +1,60 @@
+:root {
+    --page-bg: #10221f;
+    --page-bg-alt: #173733;
+    --panel: #f6efe6;
+    --panel-border: #d8c7b3;
+    --table-bg: #fffdf9;
+    --accent: #c96d44;
+    --accent-dark: #8d4a2c;
+    --ink-strong: #25302f;
+    --ink-soft: #394443;
+    --ink-muted: #5e625c;
+}
+
+html,
+body {
+    min-height: 100%;
+}
+
+body {
+    margin: 0;
+    background:
+        radial-gradient(circle at top left, rgba(69, 111, 98, 0.3), transparent 28%),
+        linear-gradient(180deg, var(--page-bg-alt) 0%, var(--page-bg) 32%, #0d1c1a 100%);
+    color: var(--ink-strong);
+    font-family: Bahnschrift, "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+    font: inherit;
+}
+
+a {
+    color: inherit;
+}
+
+h1:focus,
+h2:focus,
+h3:focus {
+    outline: none;
+}
+
+.blazor-error-boundary {
+    padding: 1rem 1rem 1rem 1.25rem;
+    border-radius: 16px;
+    background: #f4d9d5;
+    color: #8a3029;
+}
+
+.blazor-error-boundary::after {
+    content: "An error has occurred.";
+}

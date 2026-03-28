@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="MovieReporter.Core/MovieReporter.Core.csproj" Id="e1db8084-0649-44ff-9cc8-52f73c757e2a" />
-  <Project Path="MovieReporter.WPF/MovieReporter.WPF.csproj" />
+  <Project Path="MovieReporter.Web/MovieReporter.Web.csproj" Id="756c818b-bb7c-4357-ace1-accddc944801" />
+  <Project Path="MovieReporter.WPF/MovieReporter.WPF.csproj" Id="cba16d74-b1ec-4d0d-b720-af7f74d118e1" />
 </Solution>

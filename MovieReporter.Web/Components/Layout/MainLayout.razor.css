@@ -1,0 +1,40 @@
+.app-frame {
+    min-height: 100vh;
+}
+
+.app-main {
+    min-height: 100vh;
+}
+
+.app-content {
+    width: min(1480px, calc(100vw - 32px));
+    margin: 0 auto;
+    padding: 24px 0 36px;
+}
+
+#blazor-error-ui {
+    background: #f4d9d5;
+    bottom: 0;
+    box-shadow: 0 -2px 18px rgba(0, 0, 0, 0.16);
+    box-sizing: border-box;
+    display: none;
+    left: 0;
+    padding: 0.75rem 1.25rem;
+    position: fixed;
+    width: 100%;
+    z-index: 1000;
+}
+
+#blazor-error-ui .dismiss {
+    cursor: pointer;
+    position: absolute;
+    right: 0.75rem;
+    top: 0.5rem;
+}
+
+@media (max-width: 720px) {
+    .app-content {
+        width: min(100vw - 20px, 1480px);
+        padding-top: 18px;
+    }
+}

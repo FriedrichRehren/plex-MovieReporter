@@ -1,0 +1,15 @@
+.git
+.github
+.vs
+.idea
+.codex*
+.dotnet
+.codex-build
+**/bin
+**/obj
+publish
+MovieReporter.exe
+*.user
+*.suo
+*.tmp
+*.log
