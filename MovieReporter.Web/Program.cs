@@ -2,6 +2,7 @@ using System.IO;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Options;
 using MovieReporter.Web.Components;
+using MovieReporter.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 var enableHttpsRedirection = builder.Configuration.GetValue("MovieReporter:EnableHttpsRedirection", builder.Environment.IsDevelopment());
@@ -19,6 +20,9 @@ builder.Logging.AddSimpleConsole(options =>
 builder.Services.AddDataProtection()
     .SetApplicationName("MovieReporter.Web")
     .PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeysPath));
+
+builder.Services.AddSingleton<LibraryScanCoordinator>();
+builder.Services.AddHostedService<LibraryScanBackgroundService>();
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();

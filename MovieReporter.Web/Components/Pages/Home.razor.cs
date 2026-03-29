@@ -4,21 +4,18 @@ using Microsoft.AspNetCore.Components.Web;
 using Microsoft.JSInterop;
 using MovieReporter.Core;
 using MovieReporter.Core.Models;
+using MovieReporter.Web.Services;
 
 namespace MovieReporter.Web.Components.Pages;
 
-public partial class Home : ComponentBase, IAsyncDisposable
+public partial class Home : ComponentBase, IDisposable
 {
     private const string UiStateStorageKey = "movieReporter.web.uiState";
-    private const string SourceLibraryEnvironmentVariable = "MOVIE_REPORTER_SOURCE_LIBRARY";
-    private const string AutoScanIntervalSecondsEnvironmentVariable = "MOVIE_REPORTER_AUTO_SCAN_INTERVAL_SECONDS";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false
     };
-
-    private static readonly TimeSpan DefaultAutoScanInterval = TimeSpan.FromSeconds(60);
 
     private static readonly Resolution[] OrderedResolutions =
     [
@@ -46,11 +43,9 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private readonly HashSet<Format> _selectedFormats = [Format.JSON, Format.XLSX];
     private readonly HashSet<Resolution> _selectedResolutions = [];
 
+    private LibraryScanSnapshot _scanSnapshot = new();
     private MediaLibrary _scannedLibrary = new();
     private TvShowRow? _selectedTvShowRow;
-    private CancellationTokenSource? _autoRefreshCancellationTokenSource;
-    private Task? _autoRefreshLoopTask;
-    private DateTimeOffset? _lastCompletedScanAt;
     private string? _lastScannedSourceFolder;
     private bool _isBusy;
     private bool _isDisposed;
@@ -60,15 +55,15 @@ public partial class Home : ComponentBase, IAsyncDisposable
     private IJSRuntime JSRuntime { get; set; } = default!;
     [Inject]
     private ILogger<Home> Logger { get; set; } = default!;
+    [Inject]
+    private LibraryScanCoordinator ScanCoordinator { get; set; } = default!;
     private string OutputFileName { get; set; } = GetDefaultOutputFileName();
     private string SearchText { get; set; } = string.Empty;
-    private string StatusText { get; set; } = $"Scan the library using the {SourceLibraryEnvironmentVariable} environment variable.";
+    private string StatusText { get; set; } = $"Scan the library using the {LibraryScanCoordinator.SourceLibraryEnvironmentVariable} environment variable.";
     private ResultTab ActiveResultTab { get; set; } = ResultTab.Movies;
-    private TimeSpan AutoScanInterval { get; set; } = DefaultAutoScanInterval;
-    private string? ConfiguredSourceFolderPath { get; set; }
 
-    private bool IsBusy => _isBusy;
-    private bool LastOperationFailed => _lastOperationFailed;
+    private bool IsBusy => _isBusy || _scanSnapshot.IsScanInProgress;
+    private bool LastOperationFailed => _lastOperationFailed || _scanSnapshot.LastScanFailed;
     private IReadOnlyList<MovieRow> FilteredMovieRows => _filteredMovieRows;
     private IReadOnlyList<TvShowRow> FilteredTvShowRows => _filteredTvShowRows;
     private IReadOnlyList<string> ExportedFiles => _exportedFiles;
@@ -113,17 +108,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     protected override void OnInitialized()
     {
-        ConfiguredSourceFolderPath = GetConfiguredSourceFolderPath();
-        AutoScanInterval = ResolveAutoScanInterval();
-
-        if (string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
-        {
-            return;
-        }
-
-        StatusText = AutoScanInterval > TimeSpan.Zero
-            ? "Waiting for the initial automatic library scan..."
-            : "Waiting for the initial library scan...";
+        ScanCoordinator.StateChanged += OnScanStateChanged;
+        ApplyScanSnapshot(ScanCoordinator.GetSnapshot());
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -136,7 +122,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
         await LoadUiStateAsync();
         RefreshFilters();
         await InvokeAsync(StateHasChanged);
-        StartAutomaticRefreshLoop();
     }
 
     private async Task OnOutputFileNameChangedAsync(ChangeEventArgs args)
@@ -210,7 +195,21 @@ public partial class Home : ComponentBase, IAsyncDisposable
 
     private async Task ScanLibraryAsync()
     {
-        await RunLibraryScanAsync(isAutomaticRefresh: false, isInitialScan: false, CancellationToken.None);
+        await ExecuteBusyOperationAsync(
+            "manual library scan",
+            "Scanning Movies and TV Shows...",
+            async cancellationToken =>
+            {
+                var snapshot = await ScanCoordinator.RefreshAsync(LibraryScanTrigger.Manual, cancellationToken);
+                ApplyScanSnapshot(snapshot);
+
+                if (snapshot.LastScanFailed)
+                {
+                    throw new InvalidOperationException(snapshot.StatusText);
+                }
+
+                SetStatus(snapshot.StatusText);
+            });
     }
 
     private async Task ExportActiveTabAsync()
@@ -218,9 +217,8 @@ public partial class Home : ComponentBase, IAsyncDisposable
         await ExecuteBusyOperationAsync(
             "export",
             $"Exporting {GetActiveResultTabDisplayName()}...",
-            async _ =>
+            async cancellationToken =>
             {
-                var sourceFolderPath = GetConfiguredSourceFolderPathOrThrow();
                 var outputFolderPath = EnsureDownloadDirectory();
                 var outputFileName = GetOutputFileName(OutputFileName);
                 var selectedFormats = GetSelectedFormats();
@@ -230,7 +228,14 @@ public partial class Home : ComponentBase, IAsyncDisposable
                     throw new InvalidOperationException("Select at least one export format.");
                 }
 
-                await EnsureCurrentScanAsync(sourceFolderPath);
+                var scanSnapshot = await ScanCoordinator.RefreshAsync(LibraryScanTrigger.ExportRefresh, cancellationToken);
+                ApplyScanSnapshot(scanSnapshot);
+
+                if (scanSnapshot.LastScanFailed)
+                {
+                    throw new InvalidOperationException(scanSnapshot.StatusText);
+                }
+
                 var outputPathBase = Path.Combine(outputFolderPath, outputFileName + GetActiveExportSuffix());
                 var filteredMovies = GetFilteredMovies();
                 var filteredTvShows = GetFilteredTvShows();
@@ -317,33 +322,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
                 await InvokeAsync(StateHasChanged);
             }
         }
-    }
-
-    private async Task<MediaLibrary> EnsureCurrentScanAsync(string sourceFolderPath)
-    {
-        var normalizedSourceFolderPath = Path.GetFullPath(sourceFolderPath);
-
-        if (!string.IsNullOrWhiteSpace(_lastScannedSourceFolder)
-            && string.Equals(_lastScannedSourceFolder, normalizedSourceFolderPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return _scannedLibrary;
-        }
-
-        SetStatus("Refreshing scan results before export...");
-        Logger.LogInformation("Refreshing library scan before export for {SourceFolderPath}.", normalizedSourceFolderPath);
-        var mediaLibrary = await ScanLibraryFromDiskAsync(normalizedSourceFolderPath, CancellationToken.None);
-        ApplyScannedLibrary(normalizedSourceFolderPath, mediaLibrary);
-
-        return mediaLibrary;
-    }
-
-    private static Task<MediaLibrary> ScanLibraryFromDiskAsync(string sourceFolderPath, CancellationToken cancellationToken)
-    {
-        return Task.Run(() =>
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return MediaLibraryScanner.Scan(sourceFolderPath);
-        }, cancellationToken);
     }
 
     private void ApplyScannedLibrary(string sourceFolderPath, MediaLibrary mediaLibrary)
@@ -667,80 +645,37 @@ public partial class Home : ComponentBase, IAsyncDisposable
         StatusText = statusText;
     }
 
-    private void StartAutomaticRefreshLoop()
+    private void OnScanStateChanged(LibraryScanSnapshot snapshot)
     {
-        if (_autoRefreshCancellationTokenSource is not null || string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
+        _ = InvokeAsync(() =>
         {
-            return;
-        }
-
-        Logger.LogInformation(
-            "Starting automatic library refresh. Interval: {IntervalDescription}. Source: {SourceFolderPath}.",
-            AutoScanInterval > TimeSpan.Zero ? FormatRefreshInterval(AutoScanInterval) : "initial scan only",
-            ConfiguredSourceFolderPath);
-
-        _autoRefreshCancellationTokenSource = new CancellationTokenSource();
-        _autoRefreshLoopTask = RunAutomaticRefreshLoopAsync(_autoRefreshCancellationTokenSource.Token);
+            ApplyScanSnapshot(snapshot);
+            StateHasChanged();
+        });
     }
 
-    private async Task RunAutomaticRefreshLoopAsync(CancellationToken cancellationToken)
+    private void ApplyScanSnapshot(LibraryScanSnapshot snapshot)
     {
-        await RunLibraryScanAsync(isAutomaticRefresh: true, isInitialScan: true, cancellationToken);
+        _scanSnapshot = snapshot;
 
-        if (AutoScanInterval <= TimeSpan.Zero)
+        if (!string.IsNullOrWhiteSpace(snapshot.ConfiguredSourceFolderPath))
         {
-            return;
+            ApplyScannedLibrary(snapshot.ConfiguredSourceFolderPath, snapshot.Library);
+        }
+        else
+        {
+            _scannedLibrary = new MediaLibrary();
+            _lastScannedSourceFolder = null;
+            _movieRows.Clear();
+            _tvShowRows.Clear();
+            _exportedFiles.Clear();
+            RefreshFilters();
         }
 
-        try
+        if (!_isBusy)
         {
-            using var timer = new PeriodicTimer(AutoScanInterval);
-            while (await timer.WaitForNextTickAsync(cancellationToken))
-            {
-                await RunLibraryScanAsync(isAutomaticRefresh: true, isInitialScan: false, cancellationToken);
-            }
+            SetStatus(snapshot.StatusText);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            Logger.LogDebug("Stopped automatic library refresh loop.");
-        }
-    }
-
-    private async Task RunLibraryScanAsync(bool isAutomaticRefresh, bool isInitialScan, CancellationToken cancellationToken)
-    {
-        var operationName = isAutomaticRefresh
-            ? isInitialScan ? "initial automatic library scan" : "automatic library refresh"
-            : "manual library scan";
-        var busyMessage = isAutomaticRefresh
-            ? isInitialScan ? "Running initial library scan..." : "Refreshing library automatically..."
-            : "Scanning Movies and TV Shows...";
-
-        await ExecuteBusyOperationAsync(
-            operationName,
-            busyMessage,
-            async scanCancellationToken =>
-            {
-                var sourceFolderPath = GetConfiguredSourceFolderPathOrThrow();
-                Logger.LogInformation("Starting {OperationName} for {SourceFolderPath}.", operationName, sourceFolderPath);
-
-                var mediaLibrary = await ScanLibraryFromDiskAsync(sourceFolderPath, scanCancellationToken);
-                ApplyScannedLibrary(sourceFolderPath, mediaLibrary);
-                _lastCompletedScanAt = DateTimeOffset.Now;
-
-                var completionMessage = isAutomaticRefresh
-                    ? $"Library updated automatically. Found {mediaLibrary.Movies.Count} movies and {mediaLibrary.TvShows.Count} TV shows."
-                    : $"Scan complete. Found {mediaLibrary.Movies.Count} movies and {mediaLibrary.TvShows.Count} TV shows.";
-
-                SetStatus(completionMessage);
-                Logger.LogInformation(
-                    "Completed {OperationName} for {SourceFolderPath}. Found {MovieCount} movies and {TvShowCount} TV shows.",
-                    operationName,
-                    sourceFolderPath,
-                    mediaLibrary.Movies.Count,
-                    mediaLibrary.TvShows.Count);
-            },
-            cancellationToken,
-            alertOnError: !isAutomaticRefresh);
     }
 
     private async Task LoadUiStateAsync()
@@ -804,31 +739,10 @@ public partial class Home : ComponentBase, IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public void Dispose()
     {
         _isDisposed = true;
-
-        if (_autoRefreshCancellationTokenSource is null)
-        {
-            return;
-        }
-
-        _autoRefreshCancellationTokenSource.Cancel();
-
-        if (_autoRefreshLoopTask is not null)
-        {
-            try
-            {
-                await _autoRefreshLoopTask;
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        }
-
-        _autoRefreshCancellationTokenSource.Dispose();
-        _autoRefreshCancellationTokenSource = null;
-        _autoRefreshLoopTask = null;
+        ScanCoordinator.StateChanged -= OnScanStateChanged;
     }
 
     private static string BuildTvShowMetadataText(TvShow tvShow)
@@ -918,23 +832,6 @@ public partial class Home : ComponentBase, IAsyncDisposable
         return string.Join(' ', values.Where(value => !string.IsNullOrWhiteSpace(value)));
     }
 
-    private static string GetExistingDirectory(string path, string fieldName)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new InvalidOperationException($"Select a {fieldName}.");
-        }
-
-        var normalizedPath = Path.GetFullPath(path);
-
-        if (!Directory.Exists(normalizedPath))
-        {
-            throw new DirectoryNotFoundException($"The {fieldName} '{normalizedPath}' does not exist.");
-        }
-
-        return normalizedPath;
-    }
-
     private static string EnsureDownloadDirectory()
     {
         var userProfilePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -1000,66 +897,18 @@ public partial class Home : ComponentBase, IAsyncDisposable
         return args.Value is bool boolValue && boolValue;
     }
 
-    private string GetConfiguredSourceFolderPathOrThrow()
-    {
-        ConfiguredSourceFolderPath ??= GetConfiguredSourceFolderPath();
-
-        if (string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
-        {
-            throw new InvalidOperationException(
-                $"Set the {SourceLibraryEnvironmentVariable} environment variable to the root media library path.");
-        }
-
-        return GetExistingDirectory(ConfiguredSourceFolderPath, "source folder");
-    }
-
-    private static string? GetConfiguredSourceFolderPath()
-    {
-        var configuredPath = Environment.GetEnvironmentVariable(SourceLibraryEnvironmentVariable);
-
-        if (string.IsNullOrWhiteSpace(configuredPath))
-        {
-            return null;
-        }
-
-        return Path.GetFullPath(configuredPath);
-    }
-
-    private TimeSpan ResolveAutoScanInterval()
-    {
-        var configuredInterval = Environment.GetEnvironmentVariable(AutoScanIntervalSecondsEnvironmentVariable);
-
-        if (string.IsNullOrWhiteSpace(configuredInterval))
-        {
-            return DefaultAutoScanInterval;
-        }
-
-        if (!int.TryParse(configuredInterval, out var intervalSeconds) || intervalSeconds < 0)
-        {
-            Logger.LogWarning(
-                "Invalid {EnvironmentVariable} value '{ConfiguredValue}'. Falling back to {DefaultIntervalSeconds} seconds.",
-                AutoScanIntervalSecondsEnvironmentVariable,
-                configuredInterval,
-                DefaultAutoScanInterval.TotalSeconds);
-
-            return DefaultAutoScanInterval;
-        }
-
-        return intervalSeconds == 0 ? TimeSpan.Zero : TimeSpan.FromSeconds(intervalSeconds);
-    }
-
     private string BuildScanRefreshSummaryText()
     {
-        if (string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
+        if (string.IsNullOrWhiteSpace(_scanSnapshot.ConfiguredSourceFolderPath))
         {
-            return $"Set {SourceLibraryEnvironmentVariable} to enable library scanning.";
+            return $"Set {LibraryScanCoordinator.SourceLibraryEnvironmentVariable} to enable library scanning.";
         }
 
-        var lastScanText = _lastCompletedScanAt.HasValue
-            ? $"Last updated {_lastCompletedScanAt.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}."
+        var lastScanText = _scanSnapshot.LastCompletedScanAt.HasValue
+            ? $"Last updated {_scanSnapshot.LastCompletedScanAt.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}."
             : "Waiting for the first scan.";
-        var refreshText = AutoScanInterval > TimeSpan.Zero
-            ? $"Automatic refresh every {FormatRefreshInterval(AutoScanInterval)}."
+        var refreshText = _scanSnapshot.AutoScanInterval > TimeSpan.Zero
+            ? $"Automatic refresh every {FormatRefreshInterval(_scanSnapshot.AutoScanInterval)}."
             : "Automatic periodic refresh is disabled.";
 
         return $"{lastScanText} {refreshText}";
