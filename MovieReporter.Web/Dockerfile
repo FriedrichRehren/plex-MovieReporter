@@ -20,16 +20,17 @@ WORKDIR /app
 ENV ASPNETCORE_URLS=http://+:8080
 ENV MovieReporter__EnableHttpsRedirection=false
 ENV MOVIE_REPORTER_SOURCE_LIBRARY=
+ENV MOVIE_REPORTER_DATA_PROTECTION_KEYS_PATH=/home/app/.aspnet/DataProtection-Keys
 ENV HOME=/home/app
 
 USER root
-RUN mkdir -p /home/app/Downloads \
+RUN mkdir -p /home/app/Downloads /home/app/.aspnet/DataProtection-Keys \
     && chown -R ${APP_UID:-1654}:0 /app /home/app
 
 USER $APP_UID
 
 EXPOSE 8080
-VOLUME ["/home/app/Downloads"]
+VOLUME ["/home/app/Downloads", "/home/app/.aspnet/DataProtection-Keys"]
 
 COPY --from=build /app/publish .
 
