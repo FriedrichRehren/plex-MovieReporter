@@ -3,11 +3,41 @@ using MovieReporter.Web.Components;
 var builder = WebApplication.CreateBuilder(args);
 var enableHttpsRedirection = builder.Configuration.GetValue("MovieReporter:EnableHttpsRedirection", builder.Environment.IsDevelopment());
 
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(options =>
+{
+    options.SingleLine = true;
+    options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
+});
+
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
 var app = builder.Build();
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+var configuredSourceLibrary = Environment.GetEnvironmentVariable("MOVIE_REPORTER_SOURCE_LIBRARY");
+var configuredAutoScanInterval = Environment.GetEnvironmentVariable("MOVIE_REPORTER_AUTO_SCAN_INTERVAL_SECONDS");
+
+if (string.IsNullOrWhiteSpace(configuredSourceLibrary))
+{
+    logger.LogWarning("MOVIE_REPORTER_SOURCE_LIBRARY is not set. Library scanning and exports will fail until it is configured.");
+}
+else
+{
+    logger.LogInformation("Configured source library path: {SourceLibraryPath}", configuredSourceLibrary);
+}
+
+logger.LogInformation(
+    "Starting MovieReporter.Web. Environment={EnvironmentName}; HttpsRedirection={HttpsRedirectionEnabled}; AutoScanIntervalSeconds={AutoScanIntervalSeconds}.",
+    app.Environment.EnvironmentName,
+    enableHttpsRedirection,
+    string.IsNullOrWhiteSpace(configuredAutoScanInterval) ? "default" : configuredAutoScanInterval);
+
+app.Lifetime.ApplicationStarted.Register(() =>
+    logger.LogInformation("MovieReporter.Web started and is ready to accept requests."));
+app.Lifetime.ApplicationStopping.Register(() =>
+    logger.LogInformation("MovieReporter.Web is stopping."));
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

@@ -7,7 +7,7 @@
     <section class="hero-panel">
         <div>
             <h1>Movie Reporter</h1>
-            <p>Scan a root library that contains Movies and TV Shows, then export the active tab in parallel.</p>
+            <p>Scan a root library that contains Movies and TV Shows, then export the active tab in parallel. The page performs an initial scan automatically and keeps refreshing in the background.</p>
         </div>
 
         <div class="hero-status-card">
@@ -70,6 +70,7 @@
                         <div class="activity-progress" aria-hidden="true"></div>
                     }
                     <p class="activity-text @(LastOperationFailed ? "activity-text-error" : string.Empty)">@StatusText</p>
+                    <p class="muted-copy">@ScanRefreshSummaryText</p>
                 </section>
 
                 <section class="subpanel">
@@ -95,7 +96,7 @@
             <div class="results-heading">
                 <div>
                     <h2>Library Results</h2>
-                    <p>Scan once, switch between Movies and TV Shows, and export the active tab.</p>
+                    <p>The library refreshes automatically. Use Scan Library to force an immediate refresh.</p>
                 </div>
             </div>
 

@@ -7,15 +7,18 @@ using MovieReporter.Core.Models;
 
 namespace MovieReporter.Web.Components.Pages;
 
-public partial class Home : ComponentBase
+public partial class Home : ComponentBase, IAsyncDisposable
 {
     private const string UiStateStorageKey = "movieReporter.web.uiState";
     private const string SourceLibraryEnvironmentVariable = "MOVIE_REPORTER_SOURCE_LIBRARY";
+    private const string AutoScanIntervalSecondsEnvironmentVariable = "MOVIE_REPORTER_AUTO_SCAN_INTERVAL_SECONDS";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false
     };
+
+    private static readonly TimeSpan DefaultAutoScanInterval = TimeSpan.FromSeconds(60);
 
     private static readonly Resolution[] OrderedResolutions =
     [
@@ -45,16 +48,23 @@ public partial class Home : ComponentBase
 
     private MediaLibrary _scannedLibrary = new();
     private TvShowRow? _selectedTvShowRow;
+    private CancellationTokenSource? _autoRefreshCancellationTokenSource;
+    private Task? _autoRefreshLoopTask;
+    private DateTimeOffset? _lastCompletedScanAt;
     private string? _lastScannedSourceFolder;
     private bool _isBusy;
+    private bool _isDisposed;
     private bool _lastOperationFailed;
 
     [Inject]
     private IJSRuntime JSRuntime { get; set; } = default!;
+    [Inject]
+    private ILogger<Home> Logger { get; set; } = default!;
     private string OutputFileName { get; set; } = GetDefaultOutputFileName();
     private string SearchText { get; set; } = string.Empty;
     private string StatusText { get; set; } = $"Scan the library using the {SourceLibraryEnvironmentVariable} environment variable.";
     private ResultTab ActiveResultTab { get; set; } = ResultTab.Movies;
+    private TimeSpan AutoScanInterval { get; set; } = DefaultAutoScanInterval;
     private string? ConfiguredSourceFolderPath { get; set; }
 
     private bool IsBusy => _isBusy;
@@ -63,6 +73,7 @@ public partial class Home : ComponentBase
     private IReadOnlyList<TvShowRow> FilteredTvShowRows => _filteredTvShowRows;
     private IReadOnlyList<string> ExportedFiles => _exportedFiles;
     private TvShowRow? SelectedTvShowRow => _selectedTvShowRow;
+    private string ScanRefreshSummaryText => BuildScanRefreshSummaryText();
 
     private string MovieCountDisplay => FormatSummaryCount(_filteredMovieRows.Count, _movieRows.Count);
 
@@ -103,6 +114,16 @@ public partial class Home : ComponentBase
     protected override void OnInitialized()
     {
         ConfiguredSourceFolderPath = GetConfiguredSourceFolderPath();
+        AutoScanInterval = ResolveAutoScanInterval();
+
+        if (string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
+        {
+            return;
+        }
+
+        StatusText = AutoScanInterval > TimeSpan.Zero
+            ? "Waiting for the initial automatic library scan..."
+            : "Waiting for the initial library scan...";
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -114,7 +135,8 @@ public partial class Home : ComponentBase
 
         await LoadUiStateAsync();
         RefreshFilters();
-        StateHasChanged();
+        await InvokeAsync(StateHasChanged);
+        StartAutomaticRefreshLoop();
     }
 
     private async Task OnOutputFileNameChangedAsync(ChangeEventArgs args)
@@ -188,23 +210,15 @@ public partial class Home : ComponentBase
 
     private async Task ScanLibraryAsync()
     {
-        await ExecuteBusyOperationAsync(
-            "Scanning Movies and TV Shows...",
-            async () =>
-            {
-                var sourceFolderPath = GetConfiguredSourceFolderPathOrThrow();
-                var mediaLibrary = await ScanLibraryAsync(sourceFolderPath);
-
-                ApplyScannedLibrary(sourceFolderPath, mediaLibrary);
-                SetStatus($"Scan complete. Found {mediaLibrary.Movies.Count} movies and {mediaLibrary.TvShows.Count} TV shows.");
-            });
+        await RunLibraryScanAsync(isAutomaticRefresh: false, isInitialScan: false, CancellationToken.None);
     }
 
     private async Task ExportActiveTabAsync()
     {
         await ExecuteBusyOperationAsync(
+            "export",
             $"Exporting {GetActiveResultTabDisplayName()}...",
-            async () =>
+            async _ =>
             {
                 var sourceFolderPath = GetConfiguredSourceFolderPathOrThrow();
                 var outputFolderPath = EnsureDownloadDirectory();
@@ -220,6 +234,11 @@ public partial class Home : ComponentBase
                 var outputPathBase = Path.Combine(outputFolderPath, outputFileName + GetActiveExportSuffix());
                 var filteredMovies = GetFilteredMovies();
                 var filteredTvShows = GetFilteredTvShows();
+                Logger.LogInformation(
+                    "Starting export for {ResultTab} to {OutputPathBase} using formats: {Formats}.",
+                    GetActiveResultTabDisplayName(),
+                    outputPathBase,
+                    string.Join(", ", selectedFormats));
 
                 IReadOnlyCollection<ExportResult> results = ActiveResultTab switch
                 {
@@ -236,38 +255,67 @@ public partial class Home : ComponentBase
                 _exportedFiles.AddRange(results.Select(result => result.OutputPath));
 
                 SetStatus($"Export complete for {GetActiveResultTabDisplayName()}. Wrote {results.Count} file(s).");
+                Logger.LogInformation(
+                    "Completed export for {ResultTab}. Wrote {FileCount} file(s): {OutputFiles}.",
+                    GetActiveResultTabDisplayName(),
+                    results.Count,
+                    string.Join(", ", _exportedFiles));
             });
     }
 
-    private async Task ExecuteBusyOperationAsync(string busyMessage, Func<Task> operation)
+    private async Task ExecuteBusyOperationAsync(
+        string operationName,
+        string busyMessage,
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken = default,
+        bool alertOnError = true)
     {
         if (_isBusy)
         {
+            Logger.LogDebug("Skipped {OperationName} because another operation is already in progress.", operationName);
             return;
         }
 
         try
         {
             SetBusyState(true, busyMessage);
-            await operation();
+            if (!_isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+                await Task.Yield();
+            }
+
+            await operation(cancellationToken);
             _lastOperationFailed = false;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Logger.LogDebug("Canceled {OperationName}.", operationName);
         }
         catch (Exception exception)
         {
+            Logger.LogError(exception, "Failed {OperationName}.", operationName);
             _lastOperationFailed = true;
             SetStatus(exception.Message);
 
-            try
+            if (alertOnError)
             {
-                await JSRuntime.InvokeVoidAsync("alert", exception.Message);
-            }
-            catch (JSDisconnectedException)
-            {
+                try
+                {
+                    await JSRuntime.InvokeVoidAsync("alert", exception.Message);
+                }
+                catch (JSDisconnectedException)
+                {
+                }
             }
         }
         finally
         {
             SetBusyState(false);
+            if (!_isDisposed)
+            {
+                await InvokeAsync(StateHasChanged);
+            }
         }
     }
 
@@ -282,15 +330,20 @@ public partial class Home : ComponentBase
         }
 
         SetStatus("Refreshing scan results before export...");
-        var mediaLibrary = await ScanLibraryAsync(normalizedSourceFolderPath);
+        Logger.LogInformation("Refreshing library scan before export for {SourceFolderPath}.", normalizedSourceFolderPath);
+        var mediaLibrary = await ScanLibraryFromDiskAsync(normalizedSourceFolderPath, CancellationToken.None);
         ApplyScannedLibrary(normalizedSourceFolderPath, mediaLibrary);
 
         return mediaLibrary;
     }
 
-    private static Task<MediaLibrary> ScanLibraryAsync(string sourceFolderPath)
+    private static Task<MediaLibrary> ScanLibraryFromDiskAsync(string sourceFolderPath, CancellationToken cancellationToken)
     {
-        return Task.Run(() => MediaLibraryScanner.Scan(sourceFolderPath));
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return MediaLibraryScanner.Scan(sourceFolderPath);
+        }, cancellationToken);
     }
 
     private void ApplyScannedLibrary(string sourceFolderPath, MediaLibrary mediaLibrary)
@@ -614,6 +667,82 @@ public partial class Home : ComponentBase
         StatusText = statusText;
     }
 
+    private void StartAutomaticRefreshLoop()
+    {
+        if (_autoRefreshCancellationTokenSource is not null || string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
+        {
+            return;
+        }
+
+        Logger.LogInformation(
+            "Starting automatic library refresh. Interval: {IntervalDescription}. Source: {SourceFolderPath}.",
+            AutoScanInterval > TimeSpan.Zero ? FormatRefreshInterval(AutoScanInterval) : "initial scan only",
+            ConfiguredSourceFolderPath);
+
+        _autoRefreshCancellationTokenSource = new CancellationTokenSource();
+        _autoRefreshLoopTask = RunAutomaticRefreshLoopAsync(_autoRefreshCancellationTokenSource.Token);
+    }
+
+    private async Task RunAutomaticRefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        await RunLibraryScanAsync(isAutomaticRefresh: true, isInitialScan: true, cancellationToken);
+
+        if (AutoScanInterval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        try
+        {
+            using var timer = new PeriodicTimer(AutoScanInterval);
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await RunLibraryScanAsync(isAutomaticRefresh: true, isInitialScan: false, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Logger.LogDebug("Stopped automatic library refresh loop.");
+        }
+    }
+
+    private async Task RunLibraryScanAsync(bool isAutomaticRefresh, bool isInitialScan, CancellationToken cancellationToken)
+    {
+        var operationName = isAutomaticRefresh
+            ? isInitialScan ? "initial automatic library scan" : "automatic library refresh"
+            : "manual library scan";
+        var busyMessage = isAutomaticRefresh
+            ? isInitialScan ? "Running initial library scan..." : "Refreshing library automatically..."
+            : "Scanning Movies and TV Shows...";
+
+        await ExecuteBusyOperationAsync(
+            operationName,
+            busyMessage,
+            async scanCancellationToken =>
+            {
+                var sourceFolderPath = GetConfiguredSourceFolderPathOrThrow();
+                Logger.LogInformation("Starting {OperationName} for {SourceFolderPath}.", operationName, sourceFolderPath);
+
+                var mediaLibrary = await ScanLibraryFromDiskAsync(sourceFolderPath, scanCancellationToken);
+                ApplyScannedLibrary(sourceFolderPath, mediaLibrary);
+                _lastCompletedScanAt = DateTimeOffset.Now;
+
+                var completionMessage = isAutomaticRefresh
+                    ? $"Library updated automatically. Found {mediaLibrary.Movies.Count} movies and {mediaLibrary.TvShows.Count} TV shows."
+                    : $"Scan complete. Found {mediaLibrary.Movies.Count} movies and {mediaLibrary.TvShows.Count} TV shows.";
+
+                SetStatus(completionMessage);
+                Logger.LogInformation(
+                    "Completed {OperationName} for {SourceFolderPath}. Found {MovieCount} movies and {TvShowCount} TV shows.",
+                    operationName,
+                    sourceFolderPath,
+                    mediaLibrary.Movies.Count,
+                    mediaLibrary.TvShows.Count);
+            },
+            cancellationToken,
+            alertOnError: !isAutomaticRefresh);
+    }
+
     private async Task LoadUiStateAsync()
     {
         try
@@ -673,6 +802,33 @@ public partial class Home : ComponentBase
         catch (JSException)
         {
         }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _isDisposed = true;
+
+        if (_autoRefreshCancellationTokenSource is null)
+        {
+            return;
+        }
+
+        _autoRefreshCancellationTokenSource.Cancel();
+
+        if (_autoRefreshLoopTask is not null)
+        {
+            try
+            {
+                await _autoRefreshLoopTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        _autoRefreshCancellationTokenSource.Dispose();
+        _autoRefreshCancellationTokenSource = null;
+        _autoRefreshLoopTask = null;
     }
 
     private static string BuildTvShowMetadataText(TvShow tvShow)
@@ -867,6 +1023,61 @@ public partial class Home : ComponentBase
         }
 
         return Path.GetFullPath(configuredPath);
+    }
+
+    private TimeSpan ResolveAutoScanInterval()
+    {
+        var configuredInterval = Environment.GetEnvironmentVariable(AutoScanIntervalSecondsEnvironmentVariable);
+
+        if (string.IsNullOrWhiteSpace(configuredInterval))
+        {
+            return DefaultAutoScanInterval;
+        }
+
+        if (!int.TryParse(configuredInterval, out var intervalSeconds) || intervalSeconds < 0)
+        {
+            Logger.LogWarning(
+                "Invalid {EnvironmentVariable} value '{ConfiguredValue}'. Falling back to {DefaultIntervalSeconds} seconds.",
+                AutoScanIntervalSecondsEnvironmentVariable,
+                configuredInterval,
+                DefaultAutoScanInterval.TotalSeconds);
+
+            return DefaultAutoScanInterval;
+        }
+
+        return intervalSeconds == 0 ? TimeSpan.Zero : TimeSpan.FromSeconds(intervalSeconds);
+    }
+
+    private string BuildScanRefreshSummaryText()
+    {
+        if (string.IsNullOrWhiteSpace(ConfiguredSourceFolderPath))
+        {
+            return $"Set {SourceLibraryEnvironmentVariable} to enable library scanning.";
+        }
+
+        var lastScanText = _lastCompletedScanAt.HasValue
+            ? $"Last updated {_lastCompletedScanAt.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}."
+            : "Waiting for the first scan.";
+        var refreshText = AutoScanInterval > TimeSpan.Zero
+            ? $"Automatic refresh every {FormatRefreshInterval(AutoScanInterval)}."
+            : "Automatic periodic refresh is disabled.";
+
+        return $"{lastScanText} {refreshText}";
+    }
+
+    private static string FormatRefreshInterval(TimeSpan interval)
+    {
+        if (interval.TotalHours >= 1 && interval.TotalMinutes % 60 == 0)
+        {
+            return $"{interval.TotalHours:0} hour(s)";
+        }
+
+        if (interval.TotalMinutes >= 1 && interval.TotalSeconds % 60 == 0)
+        {
+            return $"{interval.TotalMinutes:0} minute(s)";
+        }
+
+        return $"{interval.TotalSeconds:0} second(s)";
     }
 
     private static string GetDefaultOutputFileName()
